@@ -1,31 +1,35 @@
 package org.embulk;
 
-import static com.google.common.base.Preconditions.checkNotNull;
-import static com.google.common.base.Preconditions.checkState;
-
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.google.common.base.Function;
-import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
 import com.google.inject.Injector;
 import com.google.inject.Module;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
+import java.util.function.Function;
 import org.embulk.config.ConfigDiff;
 import org.embulk.config.ConfigLoader;
 import org.embulk.config.ConfigSource;
 import org.embulk.config.ModelManager;
 import org.embulk.exec.BulkLoader;
+import org.embulk.exec.ExecModule;
 import org.embulk.exec.ExecutionResult;
+import org.embulk.exec.ExtensionServiceLoaderModule;
 import org.embulk.exec.GuessExecutor;
 import org.embulk.exec.PartialExecutionException;
 import org.embulk.exec.PreviewExecutor;
 import org.embulk.exec.PreviewResult;
 import org.embulk.exec.ResumeState;
+import org.embulk.exec.SystemConfigModule;
 import org.embulk.exec.TransactionStage;
 import org.embulk.guice.Bootstrap;
 import org.embulk.guice.LifeCycleInjector;
+import org.embulk.jruby.JRubyScriptingModule;
+import org.embulk.plugin.BuiltinPluginSourceModule;
+import org.embulk.plugin.PluginClassLoaderModule;
+import org.embulk.plugin.maven.MavenPluginSourceModule;
 import org.embulk.spi.BufferAllocator;
 import org.embulk.spi.ExecSession;
 
@@ -61,16 +65,27 @@ public class EmbulkEmbed {
         }
 
         public Bootstrap addModules(Iterable<? extends Module> additionalModules) {
-            final List<Module> copy = ImmutableList.copyOf(additionalModules);
-            return overrideModules(new Function<List<Module>, Iterable<Module>>() {
+            final ArrayList<Module> copyMutable = new ArrayList<>();
+            for (final Module module : additionalModules) {
+                copyMutable.add(module);
+            }
+            final List<Module> copy = Collections.unmodifiableList(copyMutable);
+            return overrideModules(new com.google.common.base.Function<List<Module>, Iterable<Module>>() {
                     public Iterable<Module> apply(List<Module> modules) {
                         return Iterables.concat(modules, copy);
                     }
                 });
         }
 
-        public Bootstrap overrideModules(Function<? super List<Module>, ? extends Iterable<? extends Module>> function) {
-            moduleOverrides.add(function);
+        @Deprecated
+        public Bootstrap overrideModules(com.google.common.base.Function<? super List<Module>, ? extends Iterable<? extends Module>> function) {
+            final Function<? super List<Module>, ? extends Iterable<? extends Module>> wrapper =
+                    new Function<List<Module>, Iterable<? extends Module>>() {
+                        public Iterable<? extends Module> apply(final List<Module> modules) {
+                            return function.apply(modules);
+                        }
+                    };
+            moduleOverrides.add(wrapper);
             return this;
         }
 
@@ -83,11 +98,9 @@ public class EmbulkEmbed {
         }
 
         private EmbulkEmbed build(boolean destroyOnShutdownHook) {
-            // TODO: Replace use of EmbulkService.
-            @SuppressWarnings("deprecation")  // https://github.com/embulk/embulk/issues/932
             org.embulk.guice.Bootstrap bootstrap = new org.embulk.guice.Bootstrap()
                     .requireExplicitBindings(false)
-                    .addModules(EmbulkService.standardModuleList(systemConfig));
+                    .addModules(standardModuleList(systemConfig));
 
             for (Function<? super List<Module>, ? extends Iterable<? extends Module>> override : moduleOverrides) {
                 bootstrap = bootstrap.overrideModules(override);
@@ -216,11 +229,17 @@ public class EmbulkEmbed {
 
         public ResumableResult(PartialExecutionException partialExecutionException) {
             this.successfulResult = null;
-            this.partialExecutionException = checkNotNull(partialExecutionException);
+            if (partialExecutionException == null) {
+                throw new NullPointerException();
+            }
+            this.partialExecutionException = partialExecutionException;
         }
 
         public ResumableResult(ExecutionResult successfulResult) {
-            this.successfulResult = checkNotNull(successfulResult);
+            if (successfulResult == null) {
+                throw new NullPointerException();
+            }
+            this.successfulResult = successfulResult;
             this.partialExecutionException = null;
         }
 
@@ -229,17 +248,23 @@ public class EmbulkEmbed {
         }
 
         public ExecutionResult getSuccessfulResult() {
-            checkState(successfulResult != null);
+            if (this.successfulResult == null) {
+                throw new IllegalStateException();
+            }
             return successfulResult;
         }
 
         public Throwable getCause() {
-            checkState(partialExecutionException != null);
+            if (this.partialExecutionException == null) {
+                throw new IllegalStateException();
+            }
             return partialExecutionException.getCause();
         }
 
         public ResumeState getResumeState() {
-            checkState(partialExecutionException != null);
+            if (this.partialExecutionException == null) {
+                throw new IllegalStateException();
+            }
             return partialExecutionException.getResumeState();
         }
 
@@ -281,5 +306,17 @@ public class EmbulkEmbed {
             }
             throw new RuntimeException(ex);
         }
+    }
+
+    static List<Module> standardModuleList(final ConfigSource systemConfig) {
+        final ArrayList<Module> moduleListBuilt = new ArrayList<>();
+        moduleListBuilt.add(new SystemConfigModule(systemConfig));
+        moduleListBuilt.add(new ExecModule());
+        moduleListBuilt.add(new ExtensionServiceLoaderModule(systemConfig));
+        moduleListBuilt.add(new PluginClassLoaderModule(systemConfig));
+        moduleListBuilt.add(new BuiltinPluginSourceModule());
+        moduleListBuilt.add(new MavenPluginSourceModule(systemConfig));
+        moduleListBuilt.add(new JRubyScriptingModule(systemConfig));
+        return Collections.unmodifiableList(moduleListBuilt);
     }
 }
